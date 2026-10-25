@@ -11,20 +11,26 @@ public class W {
 [W]::timeBeginPeriod(1) | Out-Null
 $rnd = [Random]::new()
 $sw  = [Diagnostics.Stopwatch]::new()
-$VK_XBUTTON2 = 0x06   # M5 (0x05 = M4)
+$M4 = 0x05
+$M5 = 0x06
 
-Write-Host "Activ. Tine apasat M5 pentru click stanga. Ctrl+C pentru oprire."
+Write-Host "Activ. M5 = click stanga, M4 = click dreapta. Ctrl+C pentru oprire."
 
 while ($true) {
-    if ([W]::GetAsyncKeyState($VK_XBUTTON2) -band 0x8000) {
-        $sw.Restart()
-        $cps    = 13 + $rnd.NextDouble() * 2        # 13-15 CPS
-        $period = 1000 / $cps                        # ms per click
-        $hold   = 12 + $rnd.NextDouble() * 18        # 12-30 ms hold
+    $left  = [W]::GetAsyncKeyState($M5) -band 0x8000
+    $right = [W]::GetAsyncKeyState($M4) -band 0x8000
 
-        [W]::mouse_event(0x02,0,0,0,[UIntPtr]::Zero)  # down
+    if ($left -or $right) {
+        $sw.Restart()
+        $cps    = 14.5 + $rnd.NextDouble()        # ~15 CPS
+        $period = 1000 / $cps
+        $hold   = 12 + $rnd.NextDouble() * 18
+
+        if ($left) { $down = 0x02; $up = 0x04 } else { $down = 0x08; $up = 0x10 }
+
+        [W]::mouse_event($down,0,0,0,[UIntPtr]::Zero)
         Start-Sleep -Milliseconds ([int]$hold)
-        [W]::mouse_event(0x04,0,0,0,[UIntPtr]::Zero)  # up
+        [W]::mouse_event($up,0,0,0,[UIntPtr]::Zero)
 
         $rest = $period - $sw.Elapsed.TotalMilliseconds
         if ($rest -gt 0) { Start-Sleep -Milliseconds ([int]$rest) }
