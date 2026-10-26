@@ -1,5 +1,3 @@
-$bg = ($args -contains '-bg') -or ($env:CLICKER_BG -eq '1')
-
 if (-not ("Win32" -as [type])) {
 Add-Type @"
 using System;
@@ -11,6 +9,9 @@ public class Win32 {
 
     [DllImport("user32.dll")]
     public static extern void mouse_event(int dwFlags, int dx, int dy, int dwData, int dwExtraInfo);
+
+    [DllImport("kernel32.dll")]
+    public static extern bool FreeConsole();
 
     [DllImport("winmm.dll")]
     public static extern uint timeBeginPeriod(uint uMilliseconds);
@@ -26,18 +27,6 @@ public class Win32 {
 "@
 }
 
-$procName = [Diagnostics.Process]::GetCurrentProcess().ProcessName
-
-function Stop-Completely {
-    [Win32]::mouse_event([Win32]::LEFTUP,  0,0,0,0)
-    [Win32]::mouse_event([Win32]::RIGHTUP, 0,0,0,0)
-    Get-Process -Name $procName -ErrorAction SilentlyContinue |
-        Stop-Process -Force -ErrorAction SilentlyContinue
-    exit
-}
-
-function F12-Down { ([Win32]::GetAsyncKeyState(0x7B) -lt 0) }
-
 $config = @(
 @(36,32), @(33,36), @(38,31), @(34,37), @(40,28), @(31,38),
 @(37,32), @(35,34), @(39,30), @(32,37), @(41,27), @(29,40),
@@ -51,6 +40,18 @@ $config = @(
 
 $rand = [Random]::new()
 $idx  = 0
+$procName = [Diagnostics.Process]::GetCurrentProcess().ProcessName
+
+function F12-Down { ([Win32]::GetAsyncKeyState(0x7B) -lt 0) }
+
+function Stop-Completely {
+    [Win32]::mouse_event([Win32]::LEFTUP,  0,0,0,0)
+    [Win32]::mouse_event([Win32]::RIGHTUP, 0,0,0,0)
+    [Win32]::timeEndPeriod(1)
+    Get-Process -Name $procName -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    exit
+}
 
 function SpinWaitMs($ms) {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -59,53 +60,19 @@ function SpinWaitMs($ms) {
     }
 }
 
-# watcher separat: F12 omoara tot chiar daca thread-ul principal e ocupat
-$watch = [powershell]::Create().AddScript({
-    param($name)
-    if (-not ("Win32" -as [type])) {
-        Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class Win32 {
-    [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
+Write-Host "This window will close in 5 seconds."
+Write-Host "The clicker will keep running in the background."
+Write-Host "Press F12 to stop it completely."
+Write-Host ""
+Write-Host "M5 = left click   M4 = right click   F12 = exit"
+
+$until = [Diagnostics.Stopwatch]::StartNew()
+while ($until.Elapsed.TotalSeconds -lt 5) {
+    if (F12-Down) { Stop-Completely }
+    [Threading.Thread]::Sleep(30)
 }
-"@
-    }
-    while ($true) {
-        if ([Win32]::GetAsyncKeyState(0x7B) -lt 0) {
-            Get-Process -Name $name -ErrorAction SilentlyContinue |
-                Stop-Process -Force -ErrorAction SilentlyContinue
-            break
-        }
-        [Threading.Thread]::Sleep(15)
-    }
-}).AddArgument($procName)
-[void]$watch.BeginInvoke()
 
-if (-not $bg) {
-    Write-Host "This window will close in 5 seconds."
-    Write-Host "The clicker will keep running in the background."
-    Write-Host "Press F12 to stop it completely."
-    Write-Host ""
-    Write-Host "M5 = left click   M4 = right click   F12 = exit"
-
-    $until = [Diagnostics.Stopwatch]::StartNew()
-    while ($until.Elapsed.TotalSeconds -lt 5) {
-        if (F12-Down) { Stop-Completely }
-        [Threading.Thread]::Sleep(30)
-    }
-
-    $exe = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-    $psi = [Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = $exe
-    $psi.Arguments = '-bg'
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
-    $psi.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
-    [void]$psi.Environment.Add('CLICKER_BG', '1')
-    [void][Diagnostics.Process]::Start($psi)
-    exit
-}
+[Win32]::FreeConsole() | Out-Null
 
 [Win32]::timeBeginPeriod(1)
 (Get-Process -Id $PID).PriorityClass = 'High'
@@ -138,7 +105,5 @@ try {
     }
 }
 finally {
-    [Win32]::mouse_event([Win32]::LEFTUP,  0,0,0,0)
-    [Win32]::mouse_event([Win32]::RIGHTUP, 0,0,0,0)
-    [Win32]::timeEndPeriod(1)
+    Stop-Completely
 }
