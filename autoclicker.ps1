@@ -26,7 +26,18 @@ public class Win32 {
 "@
 }
 
-# down ms, up ms  — suma ~66-72  =>  ~14-15 CPS
+$procName = [Diagnostics.Process]::GetCurrentProcess().ProcessName
+
+function Stop-Completely {
+    [Win32]::mouse_event([Win32]::LEFTUP,  0,0,0,0)
+    [Win32]::mouse_event([Win32]::RIGHTUP, 0,0,0,0)
+    Get-Process -Name $procName -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    exit
+}
+
+function F12-Down { ([Win32]::GetAsyncKeyState(0x7B) -lt 0) }
+
 $config = @(
 @(36,32), @(33,36), @(38,31), @(34,37), @(40,28), @(31,38),
 @(37,32), @(35,34), @(39,30), @(32,37), @(41,27), @(29,40),
@@ -43,8 +54,33 @@ $idx  = 0
 
 function SpinWaitMs($ms) {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($sw.Elapsed.TotalMilliseconds -lt $ms) { }
+    while ($sw.Elapsed.TotalMilliseconds -lt $ms) {
+        if (F12-Down) { Stop-Completely }
+    }
 }
+
+# watcher separat: F12 omoara tot chiar daca thread-ul principal e ocupat
+$watch = [powershell]::Create().AddScript({
+    param($name)
+    if (-not ("Win32" -as [type])) {
+        Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {
+    [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
+}
+"@
+    }
+    while ($true) {
+        if ([Win32]::GetAsyncKeyState(0x7B) -lt 0) {
+            Get-Process -Name $name -ErrorAction SilentlyContinue |
+                Stop-Process -Force -ErrorAction SilentlyContinue
+            break
+        }
+        [Threading.Thread]::Sleep(15)
+    }
+}).AddArgument($procName)
+[void]$watch.BeginInvoke()
 
 if (-not $bg) {
     Write-Host "This window will close in 5 seconds."
@@ -55,8 +91,8 @@ if (-not $bg) {
 
     $until = [Diagnostics.Stopwatch]::StartNew()
     while ($until.Elapsed.TotalSeconds -lt 5) {
-        if ([Win32]::GetAsyncKeyState(0x7B) -lt 0) { exit }
-        [Threading.Thread]::Sleep(50)
+        if (F12-Down) { Stop-Completely }
+        [Threading.Thread]::Sleep(30)
     }
 
     $exe = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
@@ -76,7 +112,7 @@ if (-not $bg) {
 
 try {
     while ($true) {
-        if ([Win32]::GetAsyncKeyState(0x7B) -lt 0) { break }
+        if (F12-Down) { Stop-Completely }
 
         $doLeft  = ([Win32]::GetAsyncKeyState(0x06) -lt 0)
         $doRight = ([Win32]::GetAsyncKeyState(0x05) -lt 0)
