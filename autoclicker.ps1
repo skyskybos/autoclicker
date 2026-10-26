@@ -1,97 +1,108 @@
-if (-not ("W" -as [type])) {
+$bg = ($args -contains '-bg') -or ($env:CLICKER_BG -eq '1')
+
+if (-not ("Win32" -as [type])) {
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
-public class W {
-  [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
-  [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e);
-  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-  [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
-  [DllImport("winmm.dll")] public static extern uint timeBeginPeriod(uint ms);
-  [DllImport("winmm.dll")] public static extern uint timeEndPeriod(uint ms);
+
+public class Win32 {
+    [DllImport("user32.dll")]
+    public static extern short GetAsyncKeyState(int vKey);
+
+    [DllImport("user32.dll")]
+    public static extern void mouse_event(int dwFlags, int dx, int dy, int dwData, int dwExtraInfo);
+
+    [DllImport("winmm.dll")]
+    public static extern uint timeBeginPeriod(uint uMilliseconds);
+
+    [DllImport("winmm.dll")]
+    public static extern uint timeEndPeriod(uint uMilliseconds);
+
+    public const int LEFTDOWN  = 0x02;
+    public const int LEFTUP    = 0x04;
+    public const int RIGHTDOWN = 0x08;
+    public const int RIGHTUP   = 0x10;
 }
 "@
 }
 
-$CPS_MIN = 13
-$CPS_MAX = 16
-$M4 = 0x05; $M5 = 0x06; $F12 = 0x7B
+# down ms, up ms  — suma ~66-72  =>  ~14-15 CPS
+$config = @(
+@(36,32), @(33,36), @(38,31), @(34,37), @(40,28), @(31,38),
+@(37,32), @(35,34), @(39,30), @(32,37), @(41,27), @(29,40),
+@(36,35), @(34,33), @(38,33), @(30,39), @(37,30), @(35,36),
+@(33,34), @(40,31), @(28,41), @(36,31), @(39,32), @(32,35),
+@(38,28), @(34,35), @(31,36), @(42,27), @(35,32), @(37,34),
+@(29,38), @(33,38), @(40,26), @(36,33), @(31,39), @(38,32),
+@(34,31), @(41,30), @(27,40), @(35,33), @(39,29), @(32,38),
+@(37,31), @(33,35)
+)
 
-[W]::timeBeginPeriod(1) | Out-Null
-(Get-Process -Id $PID).PriorityClass = 'High'
-$sw  = [Diagnostics.Stopwatch]::StartNew()
-$rnd = [Random]::new()
-$hidden = $false
+$rand = [Random]::new()
+$idx  = 0
 
-function Wait-Until([double]$t) {
-    while (($t - $sw.Elapsed.TotalMilliseconds) -gt 0) {
-        if ([W]::GetAsyncKeyState($F12) -band 0x8000) { return }
-        if (($t - $sw.Elapsed.TotalMilliseconds) -gt 2) { [Threading.Thread]::Sleep(1) }
+function SpinWaitMs($ms) {
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalMilliseconds -lt $ms) { }
+}
+
+if (-not $bg) {
+    Write-Host "This window will close in 5 seconds."
+    Write-Host "The clicker will keep running in the background."
+    Write-Host "Press F12 to stop it completely."
+    Write-Host ""
+    Write-Host "M5 = left click   M4 = right click   F12 = exit"
+
+    $until = [Diagnostics.Stopwatch]::StartNew()
+    while ($until.Elapsed.TotalSeconds -lt 5) {
+        if ([Win32]::GetAsyncKeyState(0x7B) -lt 0) { exit }
+        [Threading.Thread]::Sleep(50)
     }
+
+    $exe = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    $psi = [Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $exe
+    $psi.Arguments = '-bg'
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    [void]$psi.Environment.Add('CLICKER_BG', '1')
+    [void][Diagnostics.Process]::Start($psi)
+    exit
 }
 
-function Next-IntervalMs {
-    # ritm uman: majoritatea clickurilor ~14-15, cu jitter
-    $base = 1000.0 / (14.2 + ($rnd.NextDouble() - 0.5) * 1.4)
-    $jitter = ($rnd.NextDouble() + $rnd.NextDouble() + $rnd.NextDouble() - 1.5) * 12
-    $ms = $base + $jitter
-    $roll = $rnd.NextDouble()
-    if ($roll -lt 0.07) { $ms += 35 + $rnd.NextDouble() * 70 }   # ezitare
-    elseif ($roll -lt 0.12) { $ms *= 0.78 }                      # burst scurt
-    if ($ms -lt 55) { $ms = 55 }
-    if ($ms -gt 140) { $ms = 140 }
-    return $ms
-}
-
-Write-Host "This window will close in 5 seconds."
-Write-Host "The clicker keeps running in the background."
-Write-Host "Press F12 to stop it completely."
-Write-Host ""
-Write-Host "M5 = left click   M4 = right click   F12 = exit"
-
-$next = 0.0; $active = $false; $down = 0; $up = 0
+[Win32]::timeBeginPeriod(1)
+(Get-Process -Id $PID).PriorityClass = 'High'
 
 try {
-    while (-not ([W]::GetAsyncKeyState($F12) -band 0x8000)) {
-        if (-not $hidden -and $sw.Elapsed.TotalSeconds -ge 5) {
-            [W]::ShowWindow([W]::GetConsoleWindow(), 0) | Out-Null
-            $hidden = $true
-        }
+    while ($true) {
+        if ([Win32]::GetAsyncKeyState(0x7B) -lt 0) { break }
 
-        $l = [W]::GetAsyncKeyState($M5) -band 0x8000
-        $r = [W]::GetAsyncKeyState($M4) -band 0x8000
+        $doLeft  = ([Win32]::GetAsyncKeyState(0x06) -lt 0)
+        $doRight = ([Win32]::GetAsyncKeyState(0x05) -lt 0)
 
-        if (-not ($l -or $r)) { $active = $false; [Threading.Thread]::Sleep(2); continue }
-
-        if (-not $active) {
-            $active = $true
-            $next = $sw.Elapsed.TotalMilliseconds + 8 + $rnd.NextDouble() * 28
-        }
-
-        Wait-Until $next
-        if ([W]::GetAsyncKeyState($F12) -band 0x8000) { break }
-
-        $l = [W]::GetAsyncKeyState($M5) -band 0x8000
-        $r = [W]::GetAsyncKeyState($M4) -band 0x8000
-        if (-not ($l -or $r)) { $active = $false; continue }
-
-        # ~4% din clickuri sarite (ca un deget care rateaza)
-        if ($rnd.NextDouble() -lt 0.04) {
-            $next += Next-IntervalMs
+        if (-not ($doLeft -or $doRight)) {
+            [Threading.Thread]::Sleep(1)
             continue
         }
 
-        if ($l) { $down = 0x02; $up = 0x04 } else { $down = 0x08; $up = 0x10 }
+        $pair = $config[$idx % $config.Count]
+        $idx++
 
-        $hold = 11 + $rnd.NextDouble() * 16
-        [W]::mouse_event($down, 0, 0, 0, [UIntPtr]::Zero)
-        Wait-Until ($sw.Elapsed.TotalMilliseconds + $hold)
-        [W]::mouse_event($up, 0, 0, 0, [UIntPtr]::Zero)
+        $downDelay = [Math]::Max(1, $pair[0] + $rand.Next(-2, 3))
+        $upDelay   = [Math]::Max(1, $pair[1] + $rand.Next(-2, 3))
 
-        $next += Next-IntervalMs
+        if ($doLeft)  { [Win32]::mouse_event([Win32]::LEFTDOWN,  0,0,0,0) }
+        if ($doRight) { [Win32]::mouse_event([Win32]::RIGHTDOWN, 0,0,0,0) }
+        SpinWaitMs $downDelay
+
+        if ($doLeft)  { [Win32]::mouse_event([Win32]::LEFTUP,  0,0,0,0) }
+        if ($doRight) { [Win32]::mouse_event([Win32]::RIGHTUP, 0,0,0,0) }
+        SpinWaitMs $upDelay
     }
 }
 finally {
-    if ($up) { [W]::mouse_event($up, 0, 0, 0, [UIntPtr]::Zero) }
-    [W]::timeEndPeriod(1) | Out-Null
+    [Win32]::mouse_event([Win32]::LEFTUP,  0,0,0,0)
+    [Win32]::mouse_event([Win32]::RIGHTUP, 0,0,0,0)
+    [Win32]::timeEndPeriod(1)
 }
