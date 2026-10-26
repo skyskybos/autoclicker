@@ -10,14 +10,14 @@ public class Win32 {
     [DllImport("user32.dll")]
     public static extern void mouse_event(int dwFlags, int dx, int dy, int dwData, int dwExtraInfo);
 
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
     [DllImport("kernel32.dll")]
-    public static extern bool FreeConsole();
+    public static extern IntPtr GetConsoleWindow();
 
     [DllImport("winmm.dll")]
     public static extern uint timeBeginPeriod(uint uMilliseconds);
-
-    [DllImport("winmm.dll")]
-    public static extern uint timeEndPeriod(uint uMilliseconds);
 
     public const int LEFTDOWN  = 0x02;
     public const int LEFTUP    = 0x04;
@@ -26,6 +26,8 @@ public class Win32 {
 }
 "@
 }
+
+[Win32]::timeBeginPeriod(1)
 
 $config = @(
 @(36,32), @(33,36), @(38,31), @(34,37), @(40,28), @(31,38),
@@ -40,23 +42,11 @@ $config = @(
 
 $rand = [Random]::new()
 $idx  = 0
-$procName = [Diagnostics.Process]::GetCurrentProcess().ProcessName
-
-function F12-Down { ([Win32]::GetAsyncKeyState(0x7B) -lt 0) }
-
-function Stop-Completely {
-    [Win32]::mouse_event([Win32]::LEFTUP,  0,0,0,0)
-    [Win32]::mouse_event([Win32]::RIGHTUP, 0,0,0,0)
-    [Win32]::timeEndPeriod(1)
-    Get-Process -Name $procName -ErrorAction SilentlyContinue |
-        Stop-Process -Force -ErrorAction SilentlyContinue
-    exit
-}
 
 function SpinWaitMs($ms) {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($sw.Elapsed.TotalMilliseconds -lt $ms) {
-        if (F12-Down) { Stop-Completely }
+    while ($sw.ElapsedMilliseconds -lt $ms) {
+        if ([Win32]::GetAsyncKeyState(0x7B) -lt 0) { exit }
     }
 }
 
@@ -68,32 +58,24 @@ Write-Host "M5 = left click   M4 = right click   F12 = exit"
 
 $until = [Diagnostics.Stopwatch]::StartNew()
 while ($until.Elapsed.TotalSeconds -lt 5) {
-    if (F12-Down) { Stop-Completely }
-    [Threading.Thread]::Sleep(30)
+    if ([Win32]::GetAsyncKeyState(0x7B) -lt 0) { exit }
+    Start-Sleep -Milliseconds 30
 }
 
-[Win32]::FreeConsole() | Out-Null
+[Win32]::ShowWindow([Win32]::GetConsoleWindow(), 0) | Out-Null
 
-[Win32]::timeBeginPeriod(1)
-(Get-Process -Id $PID).PriorityClass = 'High'
+while ($true) {
+    if ([Win32]::GetAsyncKeyState(0x7B) -lt 0) { break }
 
-try {
-    while ($true) {
-        if (F12-Down) { Stop-Completely }
+    $doLeft  = ([Win32]::GetAsyncKeyState(0x06) -lt 0)
+    $doRight = ([Win32]::GetAsyncKeyState(0x05) -lt 0)
 
-        $doLeft  = ([Win32]::GetAsyncKeyState(0x06) -lt 0)
-        $doRight = ([Win32]::GetAsyncKeyState(0x05) -lt 0)
-
-        if (-not ($doLeft -or $doRight)) {
-            [Threading.Thread]::Sleep(1)
-            continue
-        }
-
+    if ($doLeft -or $doRight) {
         $pair = $config[$idx % $config.Count]
         $idx++
 
-        $downDelay = [Math]::Max(1, $pair[0] + $rand.Next(-2, 3))
-        $upDelay   = [Math]::Max(1, $pair[1] + $rand.Next(-2, 3))
+        $downDelay = [Math]::Max(1, $pair[0] + $rand.Next(-2, 2))
+        $upDelay   = [Math]::Max(1, $pair[1] + $rand.Next(-2, 2))
 
         if ($doLeft)  { [Win32]::mouse_event([Win32]::LEFTDOWN,  0,0,0,0) }
         if ($doRight) { [Win32]::mouse_event([Win32]::RIGHTDOWN, 0,0,0,0) }
@@ -103,7 +85,4 @@ try {
         if ($doRight) { [Win32]::mouse_event([Win32]::RIGHTUP, 0,0,0,0) }
         SpinWaitMs $upDelay
     }
-}
-finally {
-    Stop-Completely
 }
