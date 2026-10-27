@@ -1,47 +1,18 @@
 if (-not ("Win32" -as [type])) {
 Add-Type @"
 using System;
-using System.Text;
 using System.Runtime.InteropServices;
-
 public class Win32 {
-    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-
-    [DllImport("user32.dll")]
-    public static extern short GetAsyncKeyState(int vKey);
-
-    [DllImport("user32.dll")]
-    public static extern void mouse_event(int dwFlags, int dx, int dy, int dwData, int dwExtraInfo);
-
-    [DllImport("user32.dll")]
-    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-    [DllImport("user32.dll")]
-    public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
-
-    [DllImport("kernel32.dll")]
-    public static extern IntPtr GetConsoleWindow();
-
-    [DllImport("user32.dll")]
-    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-
-    [DllImport("user32.dll")]
-    public static extern bool IsWindowVisible(IntPtr hWnd);
-
-    [DllImport("winmm.dll")]
-    public static extern uint timeBeginPeriod(uint uMilliseconds);
-
-    public const int LEFTDOWN  = 0x02;
-    public const int LEFTUP    = 0x04;
-    public const int RIGHTDOWN = 0x08;
-    public const int RIGHTUP   = 0x10;
+    [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
+    [DllImport("user32.dll")] public static extern void mouse_event(int dwFlags, int dx, int dy, int dwData, int dwExtraInfo);
+    [DllImport("winmm.dll")]  public static extern uint timeBeginPeriod(uint ms);
+    public const int LEFTDOWN = 0x02, LEFTUP = 0x04, RIGHTDOWN = 0x08, RIGHTUP = 0x10;
 }
 "@
 }
-
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
 [Win32]::timeBeginPeriod(1) | Out-Null
 
 $config = @(
@@ -55,87 +26,114 @@ $config = @(
 @(37,31), @(33,35)
 )
 
-$rand = [Random]::new()
-$idx  = 0
-$tag  = "bosdebos-bg-$PID"
-[Console]::Title = $tag
+# stare partajata UI <-> worker
+$state = [hashtable]::Synchronized(@{
+    Running = $true; Enabled = $false; Mode = "Hold"; Left = $true; Right = $true
+})
 
-function SpinWaitMs($ms) {
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($sw.ElapsedMilliseconds -lt $ms) {
-        if ([Win32]::GetAsyncKeyState(0x7B) -lt 0) { exit }
-    }
-}
+$worker = {
+    param($s, $config)
+    $rand = [Random]::new(); $idx = 0
+    $tl = $false; $tr = $false; $pl = $false; $pr = $false
 
-function Hide-HostWindow {
-    [Win32]::ShowWindow([Win32]::GetConsoleWindow(), 0) | Out-Null
-    [Win32]::ShowWindowAsync([Win32]::GetConsoleWindow(), 0) | Out-Null
-
-    $script:needles = @($tag, 'bosdebos.exe', 'bosdebos')
-    $enum = [Win32+EnumWindowsProc] {
-        param([IntPtr]$hwnd, [IntPtr]$lParam)
-        if (-not [Win32]::IsWindowVisible($hwnd)) { return $true }
-        $sb = New-Object System.Text.StringBuilder 1024
-        [void][Win32]::GetWindowText($hwnd, $sb, $sb.Capacity)
-        $title = $sb.ToString()
-        foreach ($n in $script:needles) {
-            if ($title -like "*$n*") {
-                [void][Win32]::ShowWindow($hwnd, 0)
-                [void][Win32]::ShowWindowAsync($hwnd, 0)
-            }
+    function Wait($ms) {
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        while ($sw.ElapsedMilliseconds -lt $ms) {
+            if ([Win32]::GetAsyncKeyState(0x7B) -lt 0) { $s.Running = $false; return }
         }
-        return $true
     }
-    [Win32]::EnumWindows($enum, [IntPtr]::Zero) | Out-Null
 
-    $id = $PID
-    for ($i = 0; $i -lt 8; $i++) {
-        $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction SilentlyContinue
-        if (-not $cim -or -not $cim.ParentProcessId) { break }
-        $par = Get-Process -Id $cim.ParentProcessId -ErrorAction SilentlyContinue
-        if ($par -and $par.MainWindowHandle -ne [IntPtr]::Zero) {
-            [Win32]::ShowWindow($par.MainWindowHandle, 0) | Out-Null
-            [Win32]::ShowWindowAsync($par.MainWindowHandle, 0) | Out-Null
+    while ($s.Running) {
+        if ([Win32]::GetAsyncKeyState(0x7B) -lt 0) { $s.Running = $false; break }
+
+        if (-not $s.Enabled) { $tl = $false; $tr = $false; [Threading.Thread]::Sleep(20); continue }
+
+        $kl = ([Win32]::GetAsyncKeyState(0x06) -lt 0)   # M5
+        $kr = ([Win32]::GetAsyncKeyState(0x05) -lt 0)   # M4
+
+        if ($s.Mode -eq "Toggle") {
+            if ($kl -and -not $pl) { $tl = -not $tl }
+            if ($kr -and -not $pr) { $tr = -not $tr }
+            $doLeft = $tl -and $s.Left
+            $doRight = $tr -and $s.Right
+        } else {
+            $doLeft = $kl -and $s.Left
+            $doRight = $kr -and $s.Right
         }
-        $id = $cim.ParentProcessId
+        $pl = $kl; $pr = $kr
+
+        if ($doLeft -or $doRight) {
+            $pair = $config[$idx % $config.Count]; $idx++
+            $d = [Math]::Max(1, $pair[0] + $rand.Next(-2, 2))
+            $u = [Math]::Max(1, $pair[1] + $rand.Next(-2, 2))
+
+            if ($doLeft)  { [Win32]::mouse_event(0x02,0,0,0,0) }
+            if ($doRight) { [Win32]::mouse_event(0x08,0,0,0,0) }
+            Wait $d
+            if ($doLeft)  { [Win32]::mouse_event(0x04,0,0,0,0) }
+            if ($doRight) { [Win32]::mouse_event(0x10,0,0,0,0) }
+            Wait $u
+        } else {
+            [Threading.Thread]::Sleep(1)
+        }
     }
 }
 
-Write-Host "This window will close in 5 seconds."
-Write-Host "The clicker will keep running in the background."
-Write-Host "Press F12 to stop it completely."
-Write-Host ""
-Write-Host "M5 = left click   M4 = right click   F12 = exit"
+$rs = [runspacefactory]::CreateRunspace(); $rs.Open()
+$ps = [powershell]::Create(); $ps.Runspace = $rs
+[void]$ps.AddScript($worker).AddArgument($state).AddArgument($config)
+$null = $ps.BeginInvoke()
 
-$until = [Diagnostics.Stopwatch]::StartNew()
-while ($until.Elapsed.TotalSeconds -lt 5) {
-    if ([Win32]::GetAsyncKeyState(0x7B) -lt 0) { exit }
-    Start-Sleep -Milliseconds 30
-}
+# ---------------- UI ----------------
+$form = New-Object Windows.Forms.Form
+$form.Text = "AutoClicker"
+$form.ClientSize = New-Object Drawing.Size(240, 170)
+$form.FormBorderStyle = "FixedSingle"
+$form.MaximizeBox = $false
+$form.StartPosition = "CenterScreen"
+$form.TopMost = $true
 
-Hide-HostWindow
-Start-Sleep -Milliseconds 200
-Hide-HostWindow
+$lblMode = New-Object Windows.Forms.Label
+$lblMode.Text = "Mod:"; $lblMode.Location = '12,15'; $lblMode.AutoSize = $true
 
-while ($true) {
-    if ([Win32]::GetAsyncKeyState(0x7B) -lt 0) { break }
+$cmb = New-Object Windows.Forms.ComboBox
+$cmb.DropDownStyle = "DropDownList"
+[void]$cmb.Items.AddRange(@("Hold","Toggle"))
+$cmb.SelectedIndex = 0
+$cmb.Location = '60,12'; $cmb.Width = 160
 
-    $doLeft  = ([Win32]::GetAsyncKeyState(0x06) -lt 0)
-    $doRight = ([Win32]::GetAsyncKeyState(0x05) -lt 0)
+$chkL = New-Object Windows.Forms.CheckBox
+$chkL.Text = "M5 = click stanga"; $chkL.Checked = $true
+$chkL.Location = '12,48'; $chkL.AutoSize = $true
 
-    if ($doLeft -or $doRight) {
-        $pair = $config[$idx % $config.Count]
-        $idx++
+$chkR = New-Object Windows.Forms.CheckBox
+$chkR.Text = "M4 = click dreapta"; $chkR.Checked = $true
+$chkR.Location = '12,74'; $chkR.AutoSize = $true
 
-        $downDelay = [Math]::Max(1, $pair[0] + $rand.Next(-2, 2))
-        $upDelay   = [Math]::Max(1, $pair[1] + $rand.Next(-2, 2))
+$btn = New-Object Windows.Forms.Button
+$btn.Text = "START"; $btn.Location = '12,104'; $btn.Size = '216,30'
 
-        if ($doLeft)  { [Win32]::mouse_event([Win32]::LEFTDOWN,  0,0,0,0) }
-        if ($doRight) { [Win32]::mouse_event([Win32]::RIGHTDOWN, 0,0,0,0) }
-        SpinWaitMs $downDelay
+$lbl = New-Object Windows.Forms.Label
+$lbl.Text = "Oprit  |  F12 = iesire"; $lbl.Location = '12,144'; $lbl.AutoSize = $true
 
-        if ($doLeft)  { [Win32]::mouse_event([Win32]::LEFTUP,  0,0,0,0) }
-        if ($doRight) { [Win32]::mouse_event([Win32]::RIGHTUP, 0,0,0,0) }
-        SpinWaitMs $upDelay
-    }
-}
+$form.Controls.AddRange(@($lblMode,$cmb,$chkL,$chkR,$btn,$lbl))
+
+$cmb.Add_SelectedIndexChanged({ $state.Mode = $cmb.SelectedItem })
+$chkL.Add_CheckedChanged({ $state.Left = $chkL.Checked })
+$chkR.Add_CheckedChanged({ $state.Right = $chkR.Checked })
+$btn.Add_Click({
+    $state.Enabled = -not $state.Enabled
+    if ($state.Enabled) { $btn.Text = "STOP";  $lbl.Text = "Pornit  |  F12 = iesire" }
+    else                { $btn.Text = "START"; $lbl.Text = "Oprit  |  F12 = iesire" }
+})
+
+# inchide UI cand worker-ul primeste F12
+$timer = New-Object Windows.Forms.Timer
+$timer.Interval = 200
+$timer.Add_Tick({ if (-not $state.Running) { $form.Close() } })
+$timer.Start()
+
+$form.Add_FormClosing({ $state.Running = $false })
+[void]$form.ShowDialog()
+
+$ps.Stop(); $rs.Close()
